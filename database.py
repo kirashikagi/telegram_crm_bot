@@ -3,6 +3,15 @@ import sqlite3
 conn = sqlite3.connect("chat.db", check_same_thread=False)
 cursor = conn.cursor()
 
+# ---- ADMINS ----
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS admins (
+    user_id INTEGER PRIMARY KEY,
+    is_owner INTEGER DEFAULT 0
+)
+""")
+
+# ---- CLIENTS ----
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS clients (
     user_id INTEGER PRIMARY KEY,
@@ -12,6 +21,7 @@ CREATE TABLE IF NOT EXISTS clients (
 )
 """)
 
+# ---- MESSAGES ----
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -25,6 +35,48 @@ CREATE TABLE IF NOT EXISTS messages (
 conn.commit()
 
 
+# ---------- ADMINS ----------
+def add_admin(user_id: int, owner: bool = False):
+    cursor.execute(
+        "INSERT OR IGNORE INTO admins (user_id, is_owner) VALUES (?, ?)",
+        (user_id, int(owner))
+    )
+    conn.commit()
+
+
+def remove_admin(user_id: int):
+    cursor.execute(
+        "DELETE FROM admins WHERE user_id = ? AND is_owner = 0",
+        (user_id,)
+    )
+    conn.commit()
+
+
+def is_admin(user_id: int) -> bool:
+    cursor.execute(
+        "SELECT 1 FROM admins WHERE user_id = ?",
+        (user_id,)
+    )
+    return cursor.fetchone() is not None
+
+
+def is_owner(user_id: int) -> bool:
+    cursor.execute(
+        "SELECT is_owner FROM admins WHERE user_id = ?",
+        (user_id,)
+    )
+    row = cursor.fetchone()
+    return bool(row and row[0])
+
+
+def get_admins():
+    cursor.execute(
+        "SELECT user_id, is_owner FROM admins"
+    )
+    return cursor.fetchall()
+
+
+# ---------- CLIENTS ----------
 def get_or_create_client(user_id: int, user_name: str):
     cursor.execute("SELECT user_id FROM clients WHERE user_id = ?", (user_id,))
     if not cursor.fetchone():
@@ -72,6 +124,7 @@ def update_note(user_id: int, note: str):
     conn.commit()
 
 
+# ---------- MESSAGES ----------
 def save_message(user_id: int, sender: str, text: str):
     cursor.execute(
         "INSERT INTO messages (user_id, sender, text) VALUES (?, ?, ?)",
