@@ -42,6 +42,14 @@ admin_menu = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
+status_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🟢 Новые"), KeyboardButton(text="🟡 В работе")],
+        [KeyboardButton(text="🔴 Закрытые"), KeyboardButton(text="📋 Все")],
+    ],
+    resize_keyboard=True
+)
+
 # ---------- START ----------
 @dp.message(CommandStart())
 async def start(message: Message):
@@ -56,34 +64,50 @@ async def start(message: Message):
 @dp.message(F.text == "ℹ️ Помощь")
 async def help_menu(message: Message):
     await message.answer(
-        "📘 Инструкция для администратора\n\n"
-        "1️⃣ Клиенты — список всех клиентов\n"
-        "2️⃣ Нажмите на клиента, затем ✉️ Написать клиенту\n"
-        "3️⃣ Напишите сообщение — оно уйдёт выбранному клиенту\n"
-        "4️⃣ После диалога нажмите ✅ Завершить чат\n\n"
-        "Reply (свайп) работает как запасной вариант.\n"
-        "Если чат не выбран — бот никому не пишет."
+        "📘 Инструкция\n\n"
+        "1️⃣ Клиенты — список клиентов\n"
+        "2️⃣ Выберите статус для фильтрации\n"
+        "3️⃣ Нажмите клиента → ✉️ Написать\n"
+        "4️⃣ После диалога — ✅ Завершить чат\n\n"
+        "Reply работает как запасной вариант."
     )
 
-# ---------- СПИСОК КЛИЕНТОВ ----------
+# ---------- КЛИЕНТЫ ----------
 @dp.message(F.text == "📋 Клиенты")
-async def clients_menu(message: Message):
-    clients = get_clients()
+async def clients_root(message: Message):
+    await message.answer("Выберите статус:", reply_markup=status_menu)
+
+def show_clients(message: Message, status=None):
+    clients = get_clients(status)
     if not clients:
-        await message.answer("Клиентов пока нет.")
-        return
+        return message.answer("Клиентов нет.")
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(
-                text=f"{name} ({status})",
+                text=f"{name} ({st})",
                 callback_data=f"client:{uid}"
             )]
-            for uid, name, status in clients
+            for uid, name, st in clients
         ]
     )
+    return message.answer("📋 Клиенты:", reply_markup=keyboard)
 
-    await message.answer("📋 Клиенты:", reply_markup=keyboard)
+@dp.message(F.text == "🟢 Новые")
+async def show_new(message: Message):
+    await show_clients(message, "new")
+
+@dp.message(F.text == "🟡 В работе")
+async def show_work(message: Message):
+    await show_clients(message, "work")
+
+@dp.message(F.text == "🔴 Закрытые")
+async def show_closed(message: Message):
+    await show_clients(message, "closed")
+
+@dp.message(F.text == "📋 Все")
+async def show_all(message: Message):
+    await show_clients(message)
 
 # ---------- КАРТОЧКА ----------
 @dp.callback_query(F.data.startswith("client:"))
@@ -95,6 +119,11 @@ async def client_card(callback):
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="✉️ Написать клиенту", callback_data=f"write:{user_id}")],
+            [
+                InlineKeyboardButton(text="🟢 Новый", callback_data=f"status:{user_id}:new"),
+                InlineKeyboardButton(text="🟡 В работе", callback_data=f"status:{user_id}:work"),
+                InlineKeyboardButton(text="🔴 Закрыт", callback_data=f"status:{user_id}:closed"),
+            ],
             [InlineKeyboardButton(text="📝 Заметка", callback_data=f"note:{user_id}")],
             [InlineKeyboardButton(text="✅ Завершить чат", callback_data="finish")]
         ]
@@ -117,16 +146,23 @@ async def client_card(callback):
 @dp.callback_query(F.data.startswith("write:"))
 async def write_client(callback):
     await callback.answer()
-    client_id = int(callback.data.split(":")[1])
-    active_client[callback.from_user.id] = client_id
+    active_client[callback.from_user.id] = int(callback.data.split(":")[1])
     await callback.message.answer("✉️ Введите сообщение для клиента.")
 
-# ---------- ЗАВЕРШИТЬ ЧАТ ----------
+# ---------- СТАТУС ----------
+@dp.callback_query(F.data.startswith("status:"))
+async def change_status(callback):
+    await callback.answer()
+    _, uid, st = callback.data.split(":")
+    update_status(int(uid), st)
+    await callback.message.answer("✅ Статус обновлён.")
+
+# ---------- ЗАВЕРШИТЬ ----------
 @dp.callback_query(F.data == "finish")
 async def finish_chat(callback):
     await callback.answer()
     active_client.pop(callback.from_user.id, None)
-    await callback.message.answer("✅ Чат завершён. Клиент больше не выбран.")
+    await callback.message.answer("✅ Чат завершён.")
 
 # ---------- ЗАМЕТКА ----------
 @dp.callback_query(F.data.startswith("note:"))
@@ -139,16 +175,16 @@ async def note_start(callback):
 @dp.message(F.text & ~F.reply_to_message)
 async def text_handler(message: Message):
     if message.from_user.id in waiting_note:
-        client_id = waiting_note.pop(message.from_user.id)
-        update_note(client_id, message.text)
+        uid = waiting_note.pop(message.from_user.id)
+        update_note(uid, message.text)
         await message.answer("✅ Заметка сохранена.")
         return
 
     if message.from_user.id in active_client:
-        client_id = active_client[message.from_user.id]
-        save_message(client_id, "admin", message.text)
-        await bot.send_message(client_id, message.text)
-        await message.answer("✅ Сообщение отправлено клиенту.")
+        uid = active_client[message.from_user.id]
+        save_message(uid, "admin", message.text)
+        await bot.send_message(uid, message.text)
+        await message.answer("✅ Сообщение отправлено.")
         return
 
     if message.from_user.id != OWNER_ID:
@@ -165,9 +201,9 @@ async def text_handler(message: Message):
 async def reply_handler(message: Message):
     if "ID:" not in message.reply_to_message.text:
         return
-    client_id = int(message.reply_to_message.text.split("ID:")[1].split()[0])
-    save_message(client_id, "admin", message.text)
-    await bot.send_message(client_id, message.text)
+    uid = int(message.reply_to_message.text.split("ID:")[1].split()[0])
+    save_message(uid, "admin", message.text)
+    await bot.send_message(uid, message.text)
 
 async def main():
     await dp.start_polling(bot)
