@@ -1,88 +1,182 @@
-import sqlite3
+import os
+import asyncio
+from dotenv import load_dotenv
 
-conn = sqlite3.connect("chat.db", check_same_thread=False)
-cursor = conn.cursor()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS clients (
-    user_id INTEGER PRIMARY KEY,
-    user_name TEXT,
-    status TEXT DEFAULT 'new',
-    note TEXT DEFAULT ''
+from aiogram import Bot, Dispatcher, F
+from aiogram.filters import CommandStart
+from aiogram.types import (
+    Message,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
 )
-""")
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    sender TEXT,
-    text TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+from database import (
+    get_or_create_client,
+    get_clients,
+    get_client,
+    update_status,
+    update_note,
+    save_message,
+    get_history,
 )
-""")
 
-conn.commit()
+load_dotenv()
+
+TOKEN = os.getenv("BOT_TOKEN")
+OWNER_ID = int(os.getenv("OWNER_ID"))
+
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
+
+# активный клиент для админа
+active_client = {}
+# ожидание заметки
+waiting_note = {}
+
+admin_menu = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton(text="📋 Клиенты")]],
+    resize_keyboard=True
+)
 
 
-def get_or_create_client(user_id: int, user_name: str):
-    cursor.execute("SELECT user_id FROM clients WHERE user_id = ?", (user_id,))
-    if not cursor.fetchone():
-        cursor.execute(
-            "INSERT INTO clients (user_id, user_name) VALUES (?, ?)",
-            (user_id, user_name)
+@dp.message(CommandStart())
+async def start(message: Message):
+    if message.from_user.id == OWNER_ID:
+        await message.answer("Админ-режим активирован.", reply_markup=admin_menu)
+    else:
+        get_or_create_client(message.from_user.id, message.from_user.full_name)
+        await message.answer("Здравствуйте! Напишите сообщение — администратор ответит.")
+
+
+# ---------- СПИСОК КЛИЕНТОВ ----------
+@dp.message(F.text == "📋 Клиенты")
+async def clients_menu(message: Message):
+    if message.from_user.id != OWNER_ID:
+        return
+
+    clients = get_clients()
+    if not clients:
+        await message.answer("Клиентов пока нет.")
+        return
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(
+                text=f"{name} ({status})",
+                callback_data=f"client:{uid}"
+            )]
+            for uid, name, status in clients
+        ]
+    )
+
+    await message.answer("📋 Клиенты:", reply_markup=keyboard)
+
+
+# ---------- КАРТОЧКА КЛИЕНТА ----------
+@dp.callback_query(F.data.startswith("client:"))
+async def client_card(callback):
+    await callback.answer()
+
+    user_id = int(callback.data.split(":")[1])
+    name, status, note = get_client(user_id)
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✉️ Написать клиенту", callback_data=f"write:{user_id}")],
+            [
+                InlineKeyboardButton(text="🟢 Новый", callback_data=f"status:{user_id}:new"),
+                InlineKeyboardButton(text="🟡 В работе", callback_data=f"status:{user_id}:work"),
+                InlineKeyboardButton(text="🔴 Закрыт", callback_data=f"status:{user_id}:closed"),
+            ],
+            [InlineKeyboardButton(text="📝 Заметка", callback_data=f"note:{user_id}")]
+        ]
+    )
+
+    await callback.message.answer(
+        f"👤 {name}\n📌 Статус: {status}\n📝 Заметка: {note or '—'}",
+        reply_markup=keyboard
+    )
+
+    history = get_history(user_id)
+    if history:
+        await callback.message.answer(
+            "\n".join(
+                [("👤 " if s == "client" else "🧑‍💼 ") + m for s, m in history]
+            )
         )
-        conn.commit()
 
 
-def get_clients():
-    cursor.execute(
-        "SELECT user_id, user_name, status FROM clients ORDER BY user_name"
-    )
-    return cursor.fetchall()
+# ---------- НАПИСАТЬ КЛИЕНТУ ----------
+@dp.callback_query(F.data.startswith("write:"))
+async def write_client(callback):
+    await callback.answer()
+    client_id = int(callback.data.split(":")[1])
+    active_client[callback.from_user.id] = client_id
+    await callback.message.answer("✉️ Введите сообщение для клиента.")
 
 
-def get_client(user_id: int):
-    cursor.execute(
-        "SELECT user_name, status, note FROM clients WHERE user_id = ?",
-        (user_id,)
-    )
-    return cursor.fetchone()
+# ---------- СТАТУС ----------
+@dp.callback_query(F.data.startswith("status:"))
+async def change_status(callback):
+    await callback.answer()
+    _, user_id, status = callback.data.split(":")
+    update_status(int(user_id), status)
+    await callback.message.answer("✅ Статус обновлён.")
 
 
-def update_status(user_id: int, status: str):
-    cursor.execute(
-        "UPDATE clients SET status = ? WHERE user_id = ?",
-        (status, user_id)
-    )
-    conn.commit()
+# ---------- ЗАМЕТКА ----------
+@dp.callback_query(F.data.startswith("note:"))
+async def note_start(callback):
+    await callback.answer()
+    waiting_note[callback.from_user.id] = int(callback.data.split(":")[1])
+    await callback.message.answer("📝 Введите заметку. Следующее сообщение сохранится.")
 
 
-def update_note(user_id: int, note: str):
-    cursor.execute(
-        "UPDATE clients SET note = ? WHERE user_id = ?",
-        (note, user_id)
-    )
-    conn.commit()
+# ---------- ТЕКСТ ----------
+@dp.message(F.text & ~F.reply_to_message)
+async def text_handler(message: Message):
+    # заметка
+    if message.from_user.id in waiting_note:
+        client_id = waiting_note.pop(message.from_user.id)
+        update_note(client_id, message.text)
+        await message.answer("✅ Заметка сохранена.")
+        return
+
+    # сообщение активному клиенту
+    if message.from_user.id in active_client:
+        client_id = active_client[message.from_user.id]
+        save_message(client_id, "admin", message.text)
+        await bot.send_message(client_id, message.text)
+        await message.answer("✅ Сообщение отправлено клиенту.")
+        return
+
+    # сообщение от клиента
+    if message.from_user.id != OWNER_ID:
+        get_or_create_client(message.from_user.id, message.from_user.full_name)
+        save_message(message.from_user.id, "client", message.text)
+        await bot.send_message(
+            OWNER_ID,
+            f"📩 Новое сообщение\n{message.from_user.full_name}\nID: {message.from_user.id}\n\n{message.text}"
+        )
+        await message.answer("Сообщение отправлено администратору.")
 
 
-def save_message(user_id: int, sender: str, text: str):
-    cursor.execute(
-        "INSERT INTO messages (user_id, sender, text) VALUES (?, ?, ?)",
-        (user_id, sender, text)
-    )
-    conn.commit()
+# ---------- REPLY (ЗАПАСНОЙ ВАРИАНТ) ----------
+@dp.message(F.reply_to_message)
+async def reply_handler(message: Message):
+    if "ID:" not in message.reply_to_message.text:
+        return
+
+    client_id = int(message.reply_to_message.text.split("ID:")[1].split()[0])
+    save_message(client_id, "admin", message.text)
+    await bot.send_message(client_id, message.text)
 
 
-def get_history(user_id: int, limit: int = 20):
-    cursor.execute(
-        """
-        SELECT sender, text
-        FROM messages
-        WHERE user_id = ?
-        ORDER BY created_at DESC
-        LIMIT ?
-        """,
-        (user_id, limit)
-    )
-    return cursor.fetchall()[::-1]
+async def main():
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
