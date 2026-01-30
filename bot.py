@@ -27,16 +27,17 @@ from database import (
     get_history,
 )
 
+# ---------- ENV ----------
 load_dotenv()
-
 TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = int(os.getenv("OWNER_ID"))
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-active_client = {}
-waiting_note = {}
+# ---------- STATE ----------
+active_client = {}   # admin_id -> client_id
+waiting_note = {}    # admin_id -> client_id
 
 # ---------- MENUS ----------
 main_menu = ReplyKeyboardMarkup(
@@ -107,7 +108,6 @@ async def admins_menu(message: Message):
 
     await message.answer(text, reply_markup=main_menu)
 
-
 @dp.message(F.text.startswith("/add_admin"))
 async def add_admin_cmd(message: Message):
     if not is_owner(message.from_user.id):
@@ -116,9 +116,8 @@ async def add_admin_cmd(message: Message):
         uid = int(message.text.split()[1])
         add_admin(uid)
         await message.answer("✅ Админ добавлен.", reply_markup=main_menu)
-    except Exception:
+    except:
         await message.answer("❌ Используй: /add_admin ID")
-
 
 @dp.message(F.text.startswith("/del_admin"))
 async def del_admin_cmd(message: Message):
@@ -128,7 +127,7 @@ async def del_admin_cmd(message: Message):
         uid = int(message.text.split()[1])
         remove_admin(uid)
         await message.answer("✅ Админ удалён.", reply_markup=main_menu)
-    except Exception:
+    except:
         await message.answer("❌ Используй: /del_admin ID")
 
 # ---------- CLIENTS ----------
@@ -137,7 +136,6 @@ async def clients_root(message: Message):
     if not is_admin(message.from_user.id):
         return
     await message.answer("Выберите статус:", reply_markup=status_menu)
-
 
 async def show_clients(message: Message, status=None):
     clients = get_clients(status)
@@ -157,7 +155,6 @@ async def show_clients(message: Message, status=None):
 
     await message.answer("📋 Клиенты:", reply_markup=keyboard)
     await message.answer("Главное меню.", reply_markup=main_menu)
-
 
 @dp.message(F.text == "🟢 Новые")
 async def show_new(message: Message):
@@ -232,12 +229,15 @@ async def note_start(callback):
 # ---------- TEXT ----------
 @dp.message(F.text & ~F.reply_to_message)
 async def text_handler(message: Message):
+
+    # ---- заметка ----
     if message.from_user.id in waiting_note:
         uid = waiting_note.pop(message.from_user.id)
         update_note(uid, message.text)
         await message.answer("✅ Заметка сохранена.", reply_markup=main_menu)
         return
 
+    # ---- сообщение активному клиенту ----
     if message.from_user.id in active_client:
         uid = active_client[message.from_user.id]
         save_message(uid, "admin", message.text)
@@ -245,16 +245,21 @@ async def text_handler(message: Message):
         await message.answer("✅ Сообщение отправлено.", reply_markup=main_menu)
         return
 
+    # ---- сообщение от клиента ----
     if not is_admin(message.from_user.id):
         get_or_create_client(message.from_user.id, message.from_user.full_name)
         save_message(message.from_user.id, "client", message.text)
-        await bot.send_message(
-            OWNER_ID,
-            f"📩 Новое сообщение\n"
-            f"{message.from_user.full_name}\n"
-            f"ID: {message.from_user.id}\n\n"
-            f"{message.text}"
-        )
+
+        admins = get_admins()
+        for admin_id, _ in admins:
+            await bot.send_message(
+                admin_id,
+                f"📩 Новое сообщение\n"
+                f"{message.from_user.full_name}\n"
+                f"ID: {message.from_user.id}\n\n"
+                f"{message.text}"
+            )
+
         await message.answer("Сообщение отправлено администратору.")
 
 # ---------- REPLY ----------
@@ -268,6 +273,7 @@ async def reply_handler(message: Message):
     save_message(uid, "admin", message.text)
     await bot.send_message(uid, message.text)
 
+# ---------- MAIN ----------
 async def main():
     await dp.start_polling(bot)
 
