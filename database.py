@@ -35,10 +35,16 @@ def get_or_create_client(user_id: int, user_name: str):
         conn.commit()
 
 
-def get_clients():
-    cursor.execute(
-        "SELECT user_id, user_name, status FROM clients ORDER BY user_name"
-    )
+def get_clients(status=None):
+    if status:
+        cursor.execute(
+            "SELECT user_id, user_name, status FROM clients WHERE status = ? ORDER BY user_name",
+            (status,)
+        )
+    else:
+        cursor.execute(
+            "SELECT user_id, user_name, status FROM clients ORDER BY user_name"
+        )
     return cursor.fetchall()
 
 
