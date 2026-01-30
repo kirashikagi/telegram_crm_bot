@@ -30,32 +30,44 @@ OWNER_ID = int(os.getenv("OWNER_ID"))
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# активный клиент для админа
 active_client = {}
-# ожидание заметки
 waiting_note = {}
 
+# ---------- МЕНЮ ----------
 admin_menu = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="📋 Клиенты")]],
+    keyboard=[
+        [KeyboardButton(text="📋 Клиенты")],
+        [KeyboardButton(text="ℹ️ Помощь")],
+    ],
     resize_keyboard=True
 )
 
-
+# ---------- START ----------
 @dp.message(CommandStart())
 async def start(message: Message):
+    active_client.pop(message.from_user.id, None)
     if message.from_user.id == OWNER_ID:
-        await message.answer("Админ-режим активирован.", reply_markup=admin_menu)
+        await message.answer("Админ-меню открыто.", reply_markup=admin_menu)
     else:
         get_or_create_client(message.from_user.id, message.from_user.full_name)
         await message.answer("Здравствуйте! Напишите сообщение — администратор ответит.")
 
+# ---------- ПОМОЩЬ ----------
+@dp.message(F.text == "ℹ️ Помощь")
+async def help_menu(message: Message):
+    await message.answer(
+        "📘 Инструкция для администратора\n\n"
+        "1️⃣ Клиенты — список всех клиентов\n"
+        "2️⃣ Нажмите на клиента, затем ✉️ Написать клиенту\n"
+        "3️⃣ Напишите сообщение — оно уйдёт выбранному клиенту\n"
+        "4️⃣ После диалога нажмите ✅ Завершить чат\n\n"
+        "Reply (свайп) работает как запасной вариант.\n"
+        "Если чат не выбран — бот никому не пишет."
+    )
 
 # ---------- СПИСОК КЛИЕНТОВ ----------
 @dp.message(F.text == "📋 Клиенты")
 async def clients_menu(message: Message):
-    if message.from_user.id != OWNER_ID:
-        return
-
     clients = get_clients()
     if not clients:
         await message.answer("Клиентов пока нет.")
@@ -73,24 +85,18 @@ async def clients_menu(message: Message):
 
     await message.answer("📋 Клиенты:", reply_markup=keyboard)
 
-
-# ---------- КАРТОЧКА КЛИЕНТА ----------
+# ---------- КАРТОЧКА ----------
 @dp.callback_query(F.data.startswith("client:"))
 async def client_card(callback):
     await callback.answer()
-
     user_id = int(callback.data.split(":")[1])
     name, status, note = get_client(user_id)
 
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="✉️ Написать клиенту", callback_data=f"write:{user_id}")],
-            [
-                InlineKeyboardButton(text="🟢 Новый", callback_data=f"status:{user_id}:new"),
-                InlineKeyboardButton(text="🟡 В работе", callback_data=f"status:{user_id}:work"),
-                InlineKeyboardButton(text="🔴 Закрыт", callback_data=f"status:{user_id}:closed"),
-            ],
-            [InlineKeyboardButton(text="📝 Заметка", callback_data=f"note:{user_id}")]
+            [InlineKeyboardButton(text="📝 Заметка", callback_data=f"note:{user_id}")],
+            [InlineKeyboardButton(text="✅ Завершить чат", callback_data="finish")]
         ]
     )
 
@@ -107,8 +113,7 @@ async def client_card(callback):
             )
         )
 
-
-# ---------- НАПИСАТЬ КЛИЕНТУ ----------
+# ---------- НАПИСАТЬ ----------
 @dp.callback_query(F.data.startswith("write:"))
 async def write_client(callback):
     await callback.answer()
@@ -116,35 +121,29 @@ async def write_client(callback):
     active_client[callback.from_user.id] = client_id
     await callback.message.answer("✉️ Введите сообщение для клиента.")
 
-
-# ---------- СТАТУС ----------
-@dp.callback_query(F.data.startswith("status:"))
-async def change_status(callback):
+# ---------- ЗАВЕРШИТЬ ЧАТ ----------
+@dp.callback_query(F.data == "finish")
+async def finish_chat(callback):
     await callback.answer()
-    _, user_id, status = callback.data.split(":")
-    update_status(int(user_id), status)
-    await callback.message.answer("✅ Статус обновлён.")
-
+    active_client.pop(callback.from_user.id, None)
+    await callback.message.answer("✅ Чат завершён. Клиент больше не выбран.")
 
 # ---------- ЗАМЕТКА ----------
 @dp.callback_query(F.data.startswith("note:"))
 async def note_start(callback):
     await callback.answer()
     waiting_note[callback.from_user.id] = int(callback.data.split(":")[1])
-    await callback.message.answer("📝 Введите заметку. Следующее сообщение сохранится.")
-
+    await callback.message.answer("📝 Введите заметку.")
 
 # ---------- ТЕКСТ ----------
 @dp.message(F.text & ~F.reply_to_message)
 async def text_handler(message: Message):
-    # заметка
     if message.from_user.id in waiting_note:
         client_id = waiting_note.pop(message.from_user.id)
         update_note(client_id, message.text)
         await message.answer("✅ Заметка сохранена.")
         return
 
-    # сообщение активному клиенту
     if message.from_user.id in active_client:
         client_id = active_client[message.from_user.id]
         save_message(client_id, "admin", message.text)
@@ -152,7 +151,6 @@ async def text_handler(message: Message):
         await message.answer("✅ Сообщение отправлено клиенту.")
         return
 
-    # сообщение от клиента
     if message.from_user.id != OWNER_ID:
         get_or_create_client(message.from_user.id, message.from_user.full_name)
         save_message(message.from_user.id, "client", message.text)
@@ -162,21 +160,17 @@ async def text_handler(message: Message):
         )
         await message.answer("Сообщение отправлено администратору.")
 
-
-# ---------- REPLY (ЗАПАСНОЙ ВАРИАНТ) ----------
+# ---------- REPLY ----------
 @dp.message(F.reply_to_message)
 async def reply_handler(message: Message):
     if "ID:" not in message.reply_to_message.text:
         return
-
     client_id = int(message.reply_to_message.text.split("ID:")[1].split()[0])
     save_message(client_id, "admin", message.text)
     await bot.send_message(client_id, message.text)
 
-
 async def main():
     await dp.start_polling(bot)
-
 
 if __name__ == "__main__":
     asyncio.run(main())
